@@ -20,10 +20,10 @@ DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v19.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
 STATE_FILENAME = "state.json"
 
-MEDIA_FIELDS = (
-    "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,"
-    "children{id,media_type,media_url,thumbnail_url,permalink,timestamp,caption}"
-)
+# IG User Media edge request fields required to archive the feed.
+# This follows Meta's documentation for GET /{ig-user-id}/media to fetch a
+# user's media along with carousel children details needed for downloads.
+MEDIA_FIELDS = "id,caption,media_type,media_url,permalink,timestamp,children{id,media_url,media_type}"
 
 
 class ArchiveError(Exception):
@@ -133,16 +133,8 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
     raise ArchiveError("Unreachable code reached in request_with_retry")
 
 
-def fetch_media_page(user_id: str, access_token: str, limit: int, after: Optional[str]) -> Dict:
-    params: Dict[str, str] = {
-        "fields": MEDIA_FIELDS,
-        "access_token": access_token,
-        "limit": str(limit),
-    }
-    if after:
-        params["after"] = after
-    url = f"{GRAPH_API_BASE}/{user_id}/media"
-    return request_with_retry(url, params)
+def fetch_media_page(url: str, params: Optional[Dict[str, str]]) -> Dict:
+    return request_with_retry(url, params or {})
 
 
 def parse_timestamp(timestamp: str) -> datetime:
@@ -233,17 +225,26 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
     processed_ids = set(state.get("processed_ids", []))
     logging.info("Last archived media id: %s", last_saved_id or "<none>")
 
-    after: Optional[str] = None
+    current_url: Optional[str] = f"{GRAPH_API_BASE}/{user_id}/media"
+    params: Optional[Dict[str, str]] = {
+        # GET /{ig-user-id}/media with the media fields required to archive
+        # content locally (id, caption, media type/url, timestamp, permalink)
+        # and carousel children (media_url + media_type) per Meta docs.
+        "fields": MEDIA_FIELDS,
+        "access_token": access_token,
+        "limit": str(page_size),
+    }
     pages_fetched = 0
     new_latest_id: Optional[str] = None
     reached_existing = False
 
-    while True:
+    while current_url:
         if max_pages is not None and pages_fetched >= max_pages:
             logging.info("Reached max page limit (%s).", max_pages)
             break
 
-        payload = fetch_media_page(user_id, access_token, page_size, after)
+        payload = fetch_media_page(current_url, params)
+        params = None  # Subsequent requests use the fully qualified paging.next URL.
         media_list = payload.get("data", [])
         if not media_list:
             logging.info("No more media returned by API.")
@@ -269,9 +270,9 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
             processed_ids.add(media_id)
 
         paging = payload.get("paging", {})
-        cursors = paging.get("cursors", {}) if isinstance(paging, dict) else {}
-        after = cursors.get("after") if not reached_existing else None
-        if reached_existing or not after:
+        next_url = paging.get("next") if isinstance(paging, dict) else None
+        current_url = next_url if not reached_existing else None
+        if reached_existing or not current_url:
             break
 
     if new_latest_id:
