@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import mimetypes
 import os
 import sys
 import time
@@ -161,19 +162,65 @@ def derive_extension(url: str) -> str:
     return suffix or ""
 
 
-def download_file(url: str, dest: Path) -> None:
-    if dest.exists():
-        logging.info("File %s already exists; skipping download.", dest)
-        return
+def determine_extension(content_type: Optional[str], url: str) -> str:
+    if content_type:
+        guessed = mimetypes.guess_extension(content_type.split(";")[0].strip())
+        if guessed:
+            return guessed
+    return derive_extension(url)
 
-    logging.info("Downloading %s -> %s", url, dest)
-    with requests.get(url, stream=True, timeout=60) as resp:
-        resp.raise_for_status()
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open("wb") as handle:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    handle.write(chunk)
+
+def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3) -> Optional[Path]:
+    try:
+        if dest.exists() and dest.stat().st_size > 0:
+            logging.info("File %s already exists; skipping download.", dest)
+            return dest
+    except OSError as exc:
+        logging.warning("Could not check existing file %s: %s", dest, exc)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    backoff = 1.5
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with requests.get(url, stream=True, timeout=timeout) as resp:
+                resp.raise_for_status()
+                ext = dest.suffix or determine_extension(resp.headers.get("Content-Type"), url)
+                final_dest = dest if dest.suffix or not ext else dest.with_suffix(ext)
+
+                try:
+                    if final_dest.exists() and final_dest.stat().st_size > 0:
+                        logging.info("File %s already exists; skipping download.", final_dest)
+                        return final_dest
+                except OSError as exc:
+                    logging.warning("Could not check existing file %s: %s", final_dest, exc)
+
+                tmp_path = final_dest.with_suffix(final_dest.suffix + ".part")
+                with tmp_path.open("wb") as handle:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            handle.write(chunk)
+                tmp_path.replace(final_dest)
+                logging.info("Downloaded %s -> %s", url, final_dest)
+                return final_dest
+        except requests.RequestException as exc:
+            logging.warning(
+                "Download failed for %s (attempt %s/%s): %s",
+                url,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            if attempt < max_attempts:
+                sleep_time = backoff ** attempt
+                logging.info("Retrying download in %.1f seconds...", sleep_time)
+                time.sleep(sleep_time)
+        except OSError as exc:
+            logging.error("Failed to write %s: %s", dest, exc)
+            break
+
+    logging.error("Giving up on downloading %s after %s attempts.", url, max_attempts)
+    return None
 
 
 def save_metadata(media_dir: Path, metadata: Dict) -> None:
@@ -197,10 +244,10 @@ def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
         if not url:
             logging.warning("Child %s has no downloadable URL; skipping.", child.get("id"))
             continue
-        ext = derive_extension(url)
-        dest = media_dir / f"child_{index:02d}{ext}"
-        download_file(url, dest)
-        downloaded.append(str(dest))
+        dest = media_dir / f"child_{index:02d}"
+        downloaded_path = download_file(url, dest)
+        if downloaded_path:
+            downloaded.append(str(downloaded_path))
     return downloaded
 
 
@@ -234,8 +281,7 @@ def archive_media_item(base_dir: Path, media: Dict, access_token: str) -> None:
 
     download_target = media.get("media_url") or media.get("thumbnail_url")
     if download_target:
-        ext = derive_extension(download_target)
-        download_file(download_target, media_dir / f"media_01{ext}")
+        download_file(download_target, media_dir / "media_01")
     else:
         logging.warning("No media_url/thumbnail_url for %s; metadata saved only.", media_id)
 
