@@ -10,7 +10,16 @@ Local-only archiver for your Instagram account using the official Instagram Grap
 - Works from cron/Task Scheduler or manual runs.
 
 ## Setup
-1. Create a long-lived Instagram access token and the Instagram Business/User ID from Meta.
+### Instagram Graph API access checklist (required for legal use)
+1. Use a **professional Instagram account** (Creator or Business). Personal accounts cannot access the Instagram Graph API.【F:https://developers.facebook.com/docs/instagram-api/getting-started†L25-L33】
+2. **Link the Instagram professional account to a Facebook Page** you manage; this creates/associates the Instagram Business Account (IBA). The **Instagram Business Account ID** comes from the linked Page (e.g., via the Page's `instagram_business_account` field in Graph API or Page settings).【F:https://developers.facebook.com/docs/instagram-api/getting-started†L41-L50】
+3. Create a **Facebook App** with Instagram Basic Display/Instagram Graph permissions and note your **App ID**, **App Secret**, and a **Redirect URI** that you control.【F:https://developers.facebook.com/docs/instagram-basic-display-api/getting-started†L50-L67】
+4. Obtain a **user access token** with the scopes `instagram_basic`, `pages_show_list`, and `pages_read_engagement` (plus any others your use-case requires). Start with a **short-lived user access token** (via the OAuth authorize → redirect → `code` → token exchange flow) and then exchange it for a **long-lived user access token** to avoid quick expiry.【F:https://developers.facebook.com/docs/instagram-basic-display-api/guides/getting-access-tokens-and-permissions†L1-L36】
+5. The OAuth/token exchange path requires you to collect: `app_id`, `app_secret`, `redirect_uri`, the temporary `code` returned to your redirect URI, the initial short-lived `access_token`, and (after exchange) the long-lived `access_token` and its expiry. Perform the long-lived exchange by calling Meta's **Access Token endpoint** with your short-lived token, App ID, and App Secret.【F:https://developers.facebook.com/docs/facebook-login/guides/access-tokens/get-long-lived†L36-L59】
+6. Long-lived tokens can be refreshed (via the same endpoint) before expiration; store the token and its expiry securely.
+
+### Project configuration
+1. Create a long-lived Instagram access token and the Instagram Business/User ID from Meta (see checklist above).
 2. Copy the sample environment file and fill in your values:
    ```bash
    cp config.example.env .env
