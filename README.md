@@ -40,13 +40,17 @@ Local-only archiver for your Instagram account using the official Instagram Grap
 6. On startup the script performs a lightweight Graph API call (`/{ig-user-id}?fields=id,username`) to ensure the token is valid and belongs to the configured user. If unauthorized, it exits with a clear error so you can refresh the token before any archiving occurs.
 
 ## Running the archive
-```bash
-python ig_archive.py --output-dir InstagramArchive
-```
+Commands:
 
-Useful flags:
-- `--page-size`: up to 50; defaults to 50.
-- `--max-pages`: stop after N pages (helpful for testing).
+- `python ig_archive.py run` (default): archive media, continuing through pages until none remain.
+- `python ig_archive.py run --since-last`: stop once the `last_saved_media_id` marker in `state.json` is encountered.
+- `python ig_archive.py backfill --max-pages N`: page through older media with an optional page cap.
+- `python ig_archive.py doctor`: verify environment variables, token validity, and write permissions.
+
+Common flags:
+- `--output-dir`: defaults to `InstagramArchive` (or `$IG_ARCHIVE_DIR`).
+- `--page-size`: up to 50; defaults to 50 for run/backfill.
+- `--max-pages`: stop after N pages (helpful for testing/backfills).
 - `--log-file`: override log location (defaults to `<output-dir>/archive.log`).
 
 Outputs are organized as:
@@ -81,9 +85,9 @@ Re-running the script is safe and idempotent:
 ## Automation
 Add a cron entry (runs daily at 2:15 AM):
 ```
-15 2 * * * cd /path/to/instArchiver && /usr/bin/env IG_USER_ID=... IG_ACCESS_TOKEN=... /usr/bin/python ig_archive.py --output-dir /path/to/InstagramArchive >> /path/to/InstagramArchive/cron.log 2>&1
+15 2 * * * cd /path/to/instArchiver && /usr/bin/env IG_USER_ID=... IG_ACCESS_TOKEN=... /usr/bin/python ig_archive.py run --output-dir /path/to/InstagramArchive >> /path/to/InstagramArchive/archive.log 2>&1
 ```
-On Windows Task Scheduler, create a basic task that calls `python ig_archive.py` with the environment variables set in the task configuration.
+On Windows Task Scheduler, create a basic task that calls `python ig_archive.py run` and sets the `IG_USER_ID` and `IG_ACCESS_TOKEN` environment variables in the task configuration (e.g., via the task's "Start in" directory and configured variables).
 
 ## Troubleshooting
 - Ensure the access token has not expired and includes `instagram_basic` and `pages_show_list` permissions.
