@@ -18,6 +18,7 @@ import requests
 
 DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v19.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
+STATE_FILENAME = "state.json"
 
 MEDIA_FIELDS = (
     "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,"
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Archive Instagram media locally.")
     parser.add_argument(
         "--output-dir",
-        default=os.getenv("IG_ARCHIVE_DIR", "archive"),
+        default=os.getenv("IG_ARCHIVE_DIR", "InstagramArchive"),
         help="Directory where media and metadata will be stored.",
     )
     parser.add_argument(
@@ -75,16 +76,31 @@ def get_env_var(name: str) -> str:
     return value
 
 
-def load_last_media_id(output_dir: Path) -> Optional[str]:
-    marker = output_dir / "last_media_id.txt"
-    if marker.exists():
-        return marker.read_text(encoding="utf-8").strip() or None
-    return None
+def load_state(output_dir: Path) -> Dict:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    state_path = output_dir / STATE_FILENAME
+    if not state_path.exists():
+        return {
+            "last_saved_media_id": None,
+            "last_run_iso": None,
+            "processed_ids": [],
+        }
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ArchiveError(f"Invalid state file: {state_path}") from exc
+
+    state.setdefault("processed_ids", [])
+    state.setdefault("last_saved_media_id", None)
+    state.setdefault("last_run_iso", None)
+    return state
 
 
-def save_last_media_id(output_dir: Path, media_id: str) -> None:
-    marker = output_dir / "last_media_id.txt"
-    marker.write_text(media_id, encoding="utf-8")
+def save_state(output_dir: Path, state: Dict) -> None:
+    state_path = output_dir / STATE_FILENAME
+    state["last_run_iso"] = datetime.utcnow().isoformat()
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> Dict:
@@ -146,10 +162,10 @@ def ensure_media_dir(base_dir: Path, timestamp: str, media_id: str) -> Path:
     return media_dir
 
 
-def derive_filename(url: str) -> str:
+def derive_extension(url: str) -> str:
     path = urlparse(url).path
-    name = Path(path).name
-    return name or "media"
+    suffix = Path(path).suffix
+    return suffix or ""
 
 
 def download_file(url: str, dest: Path) -> None:
@@ -168,7 +184,7 @@ def download_file(url: str, dest: Path) -> None:
 
 
 def save_metadata(media_dir: Path, metadata: Dict) -> None:
-    metadata_path = media_dir / "metadata.json"
+    metadata_path = media_dir / "meta.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     caption = metadata.get("caption") or ""
     (media_dir / "caption.txt").write_text(caption, encoding="utf-8")
@@ -176,13 +192,13 @@ def save_metadata(media_dir: Path, metadata: Dict) -> None:
 
 def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
     downloaded: List[str] = []
-    for child in children:
+    for index, child in enumerate(children, start=1):
         url = child.get("media_url") or child.get("thumbnail_url")
         if not url:
             logging.warning("Child %s has no downloadable URL; skipping.", child.get("id"))
             continue
-        filename = derive_filename(url)
-        dest = media_dir / f"child_{child['id']}_{filename}"
+        ext = derive_extension(url)
+        dest = media_dir / f"child_{index:02d}{ext}"
         download_file(url, dest)
         downloaded.append(str(dest))
     return downloaded
@@ -200,8 +216,8 @@ def archive_media_item(base_dir: Path, media: Dict) -> None:
 
     download_target = media.get("media_url") or media.get("thumbnail_url")
     if download_target:
-        filename = derive_filename(download_target)
-        download_file(download_target, media_dir / filename)
+        ext = derive_extension(download_target)
+        download_file(download_target, media_dir / f"media_01{ext}")
     else:
         logging.warning("No media_url/thumbnail_url for %s; metadata saved only.", media_id)
 
@@ -212,7 +228,9 @@ def archive_media_item(base_dir: Path, media: Dict) -> None:
 
 
 def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, max_pages: Optional[int]) -> None:
-    last_saved_id = load_last_media_id(output_dir)
+    state = load_state(output_dir)
+    last_saved_id = state.get("last_saved_media_id")
+    processed_ids = set(state.get("processed_ids", []))
     logging.info("Last archived media id: %s", last_saved_id or "<none>")
 
     after: Optional[str] = None
@@ -240,11 +258,15 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
                 continue
             if new_latest_id is None:
                 new_latest_id = media_id
+            if media_id in processed_ids:
+                logging.info("Media %s already processed; skipping.", media_id)
+                continue
             if last_saved_id and media_id == last_saved_id:
                 reached_existing = True
                 logging.info("Reached previously archived media id %s; stopping.", media_id)
                 break
             archive_media_item(output_dir, media)
+            processed_ids.add(media_id)
 
         paging = payload.get("paging", {})
         cursors = paging.get("cursors", {}) if isinstance(paging, dict) else {}
@@ -253,8 +275,11 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
             break
 
     if new_latest_id:
-        save_last_media_id(output_dir, new_latest_id)
-        logging.info("Updated last_media_id marker to %s", new_latest_id)
+        state["last_saved_media_id"] = new_latest_id
+        logging.info("Updated state marker to %s", new_latest_id)
+
+    state["processed_ids"] = sorted(processed_ids)
+    save_state(output_dir, state)
 
 
 def main() -> None:
