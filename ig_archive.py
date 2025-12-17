@@ -24,6 +24,11 @@ import requests
 
 DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v19.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
+DEFAULT_ARCHIVE_DIR = (
+    os.getenv("IG_ARCHIVE_DATA_DIR")
+    or os.getenv("IG_ARCHIVE_DIR")
+    or "InstagramArchive"
+)
 STATE_FILENAME = "state.json"
 
 JsonDict = Dict[str, Any]
@@ -44,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Archive Instagram media locally.")
     parser.add_argument(
         "--output-dir",
-        default=os.getenv("IG_ARCHIVE_DIR", "InstagramArchive"),
+        default=DEFAULT_ARCHIVE_DIR,
         help="Directory where media and metadata will be stored.",
     )
     parser.add_argument(
