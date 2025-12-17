@@ -44,19 +44,61 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path for the log file. Defaults to <output-dir>/archive.log.",
     )
-    parser.add_argument(
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser(
+        "run", help="Archive Instagram media (default command)."
+    )
+    run_parser.set_defaults(command="run")
+    run_parser.add_argument(
         "--page-size",
         type=int,
         default=50,
         help="Number of media items to request per page (max allowed by API is 50).",
     )
-    parser.add_argument(
+    run_parser.add_argument(
         "--max-pages",
         type=int,
         default=None,
         help="Optional limit to the number of pages fetched (useful for debugging).",
     )
-    return parser.parse_args()
+    run_parser.add_argument(
+        "--since-last",
+        action="store_true",
+        help="Stop when the previously saved media id is encountered.",
+    )
+
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Validate environment variables and configuration."
+    )
+    doctor_parser.set_defaults(command="doctor")
+
+    backfill_parser = subparsers.add_parser(
+        "backfill", help="Page backwards through media with an optional limit."
+    )
+    backfill_parser.set_defaults(command="backfill")
+    backfill_parser.add_argument(
+        "--page-size",
+        type=int,
+        default=50,
+        help="Number of media items to request per page (max allowed by API is 50).",
+    )
+    backfill_parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Optional limit to the number of pages fetched (useful for debugging).",
+    )
+
+    args = parser.parse_args()
+    if args.command is None:
+        args.command = "run"
+        args.page_size = 50
+        args.max_pages = None
+        args.since_last = False
+
+    return args
 
 
 def ensure_logging(log_file: Path) -> None:
@@ -76,6 +118,16 @@ def get_env_var(name: str) -> str:
     if not value:
         raise ArchiveError(f"Environment variable {name} is required.")
     return value
+
+
+def check_write_permissions(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        test_file = path / ".write_test"
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ArchiveError(f"Cannot write to {path}: {exc}") from exc
 
 
 def load_state(output_dir: Path) -> Dict:
@@ -414,7 +466,14 @@ def archive_media_item(base_dir: Path, media: Dict, access_token: str) -> None:
         archive_children(media_dir, children_data)
 
 
-def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, max_pages: Optional[int]) -> None:
+def archive(
+    user_id: str,
+    access_token: str,
+    output_dir: Path,
+    page_size: int,
+    max_pages: Optional[int],
+    stop_at_last_saved: bool,
+) -> None:
     state = load_state(output_dir)
     last_saved_id = state.get("last_saved_media_id")
     processed_ids = set(state.get("processed_ids", []))
@@ -457,7 +516,7 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
             if media_id in processed_ids:
                 logging.info("Media %s already processed; skipping.", media_id)
                 continue
-            if last_saved_id and media_id == last_saved_id:
+            if stop_at_last_saved and last_saved_id and media_id == last_saved_id:
                 reached_existing = True
                 logging.info("Reached previously archived media id %s; stopping.", media_id)
                 break
@@ -478,11 +537,40 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
     save_state(output_dir, state)
 
 
+def run_doctor(output_dir: Path, log_file: Path) -> None:
+    user_id = get_env_var("IG_USER_ID")
+    access_token = get_env_var("IG_ACCESS_TOKEN")
+
+    check_write_permissions(output_dir)
+    check_write_permissions(log_file.parent)
+    validate_access_token(user_id, access_token)
+
+    logging.info("IG_USER_ID present: %s", user_id)
+    logging.info("Log file path: %s", log_file)
+    logging.info("Output directory writable: %s", output_dir)
+    logging.info("Access token validated successfully.")
+
+
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     log_file = Path(args.log_file) if args.log_file else output_dir / "archive.log"
+    try:
+        check_write_permissions(output_dir)
+        check_write_permissions(log_file.parent)
+    except ArchiveError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(1)
+
     ensure_logging(log_file)
+
+    if args.command == "doctor":
+        try:
+            run_doctor(output_dir, log_file)
+        except ArchiveError as exc:
+            logging.error(exc)
+            sys.exit(1)
+        return
 
     try:
         user_id = get_env_var("IG_USER_ID")
@@ -493,7 +581,14 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        archive(user_id, access_token, output_dir, args.page_size, args.max_pages)
+        archive(
+            user_id,
+            access_token,
+            output_dir,
+            args.page_size,
+            args.max_pages,
+            stop_at_last_saved=getattr(args, "since_last", False),
+        )
     except ArchiveError as exc:
         logging.error("Archiving failed: %s", exc)
         sys.exit(1)
