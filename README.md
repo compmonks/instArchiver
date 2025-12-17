@@ -36,6 +36,8 @@ Local-only archiver for your Instagram account using the official Instagram Grap
    ```bash
    python -m pip install --upgrade requests
    ```
+5. The script reads tokens **only from environment variables**. Avoid printing tokens anywhere (logs redact token parameters).
+6. On startup the script performs a lightweight Graph API call (`/{ig-user-id}?fields=id,username`) to ensure the token is valid and belongs to the configured user. If unauthorized, it exits with a clear error so you can refresh the token before any archiving occurs.
 
 ## Running the archive
 ```bash
@@ -87,3 +89,20 @@ On Windows Task Scheduler, create a basic task that calls `python ig_archive.py`
 - Ensure the access token has not expired and includes `instagram_basic` and `pages_show_list` permissions.
 - Check `archive.log` for rate-limit or permission errors.
 - Use `--max-pages 1` for a quick sanity check while configuring.
+
+## Token lifecycle helper (optional)
+If you only have a short-lived user access token, you can exchange it for a long-lived token using Meta's [Access Token endpoint](https://developers.facebook.com/docs/facebook-login/guides/access-tokens/get-long-lived). A helper function is available in `ig_archive.py`:
+
+```python
+from ig_archive import exchange_short_lived_token
+
+payload = exchange_short_lived_token(
+    short_lived_token="<short-lived-token>",
+    app_id="<app-id>",
+    app_secret="<app-secret>",
+)
+long_lived_token = payload["access_token"]
+expires_in_seconds = payload.get("expires_in")
+```
+
+Store the returned `access_token` securely and set it via `IG_ACCESS_TOKEN` before running the archiver.

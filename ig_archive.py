@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -105,6 +105,111 @@ def save_state(output_dir: Path, state: Dict) -> None:
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def validate_access_token(user_id: str, access_token: str) -> None:
+    """Run a lightweight Graph API call to verify token validity without logging it."""
+
+    url = f"{GRAPH_API_BASE}/{user_id}"
+    params = {
+        "fields": "id,username",
+        "access_token": access_token,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+    except requests.RequestException as exc:  # noqa: PERF203
+        raise ArchiveError(
+            f"Token validation request failed: {safe_error_context(exc)}"
+        ) from exc
+
+    if response.status_code == 401:
+        raise ArchiveError(
+            "Access token unauthorized (401). Refresh the long-lived token following Meta docs."
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:  # noqa: PERF203
+        raise ArchiveError("Unexpected response during token validation.") from exc
+
+    if "error" in data:
+        message = data.get("error", {}).get("message") or "Unknown error"
+        raise ArchiveError(f"Access token validation failed: {message}")
+
+    resolved_id = data.get("id")
+    if resolved_id and resolved_id != user_id:
+        raise ArchiveError(
+            "Validated token belongs to a different Instagram account; check IG_USER_ID."
+        )
+
+    logging.info("Access token validated for Instagram user %s", resolved_id or user_id)
+
+
+def exchange_short_lived_token(
+    short_lived_token: str, app_id: str, app_secret: str
+) -> Dict[str, str]:
+    """
+    Optional helper to exchange a short-lived token for a long-lived one using
+    Meta's access token endpoint. Returns the long-lived token payload (includes
+    `access_token` and `expires_in`). Keep tokens out of logs when calling this.
+    """
+
+    url = f"{GRAPH_API_BASE}/oauth/access_token"
+    params = {
+        "grant_type": "fb_exchange_token",
+        "client_id": app_id,
+        "client_secret": app_secret,
+        "fb_exchange_token": short_lived_token,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+    except requests.RequestException as exc:  # noqa: PERF203
+        raise ArchiveError(
+            f"Long-lived token exchange request failed: {safe_error_context(exc)}"
+        ) from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:  # noqa: PERF203
+        raise ArchiveError("Unexpected response during token exchange.") from exc
+
+    if not response.ok:
+        error_message = data.get("error", {}).get("message") if isinstance(data, dict) else None
+        message = error_message or f"HTTP {response.status_code} during token exchange"
+        raise ArchiveError(message)
+
+    if "access_token" not in data:
+        raise ArchiveError("Long-lived token exchange response missing access_token.")
+
+    return data
+
+
+def redact_tokens(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    redacted_query = [
+        (key, value)
+        for key, value in query
+        if "token" not in key.lower()
+    ]
+    sanitized_query = urlencode(redacted_query, doseq=True)
+    sanitized = parsed._replace(query=sanitized_query)
+    return urlunparse(sanitized)
+
+
+def safe_error_context(exc: Exception) -> str:
+    if isinstance(exc, requests.RequestException):
+        request_url = getattr(getattr(exc, "request", None), "url", None)
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        parts = []
+        if status:
+            parts.append(f"status {status}")
+        if request_url:
+            parts.append(f"url {redact_tokens(request_url)}")
+        return "; ".join(parts) or exc.__class__.__name__
+    return str(exc)
+
+
 def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> Dict:
     backoff = 1.5
     session = requests.Session()
@@ -114,21 +219,32 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 logging.warning(
                     "Request to %s failed with status %s (attempt %s/%s).",
-                    url,
+                    redact_tokens(url),
                     response.status_code,
                     attempt,
                     max_attempts,
                 )
                 raise ArchiveError("Temporary API error")
 
-            response.raise_for_status()
+            if not response.ok:
+                error_message = None
+                try:
+                    error_message = response.json().get("error", {}).get("message")
+                except ValueError:
+                    error_message = response.text or None
+                message = error_message or f"HTTP {response.status_code}"
+                raise ArchiveError(message)
+
             data = response.json()
             if "error" in data:
                 raise ArchiveError(str(data["error"]))
             return data
         except (requests.RequestException, ArchiveError) as exc:  # noqa: PERF203
             if attempt == max_attempts:
-                raise ArchiveError(f"Request failed after {max_attempts} attempts: {exc}")
+                safe_detail = safe_error_context(exc)
+                raise ArchiveError(
+                    f"Request failed after {max_attempts} attempts: {safe_detail}"
+                )
             sleep_time = backoff ** attempt
             logging.info("Retrying in %.1f seconds...", sleep_time)
             time.sleep(sleep_time)
@@ -371,6 +487,7 @@ def main() -> None:
     try:
         user_id = get_env_var("IG_USER_ID")
         access_token = get_env_var("IG_ACCESS_TOKEN")
+        validate_access_token(user_id, access_token)
     except ArchiveError as exc:
         logging.error(exc)
         sys.exit(1)
