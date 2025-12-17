@@ -30,7 +30,7 @@ Local-only archiver for your Instagram account using the official Instagram Grap
    export IG_USER_ID=1234567890
    export IG_ACCESS_TOKEN=EAAG...
    export IG_API_VERSION=v19.0  # optional
-   export IG_ARCHIVE_DIR=archive  # optional output directory
+   export IG_ARCHIVE_DIR=InstagramArchive  # optional output directory
    ```
 4. Ensure Python 3.11+ is available. Install the only dependency:
    ```bash
@@ -39,7 +39,7 @@ Local-only archiver for your Instagram account using the official Instagram Grap
 
 ## Running the archive
 ```bash
-python ig_archive.py --output-dir archive
+python ig_archive.py --output-dir InstagramArchive
 ```
 
 Useful flags:
@@ -49,23 +49,37 @@ Useful flags:
 
 Outputs are organized as:
 ```
-archive/
+InstagramArchive/
+  state.json           # run bookkeeping
+  archive.log          # default log file
   2024-05-20/
-    1234567890/
-      metadata.json
-      caption.txt
-      <media file(s)>
-      child_<child-id>_<filename>
-  last_media_id.txt
-  archive.log
+    1234567890/        # media id
+      meta.json        # full API payload for the media item
+      caption.txt      # caption if present
+      media_01.jpg     # single image/video payload
+      child_01.jpg     # carousel children (child_02.jpg, ...)
 ```
 
-Re-running the script is safe: it skips existing files and halts once it encounters the `last_media_id.txt` marker.
+On-disk schema details:
+- **Root folder**: `./InstagramArchive/` (configurable via `--output-dir` or `IG_ARCHIVE_DIR`).
+- **Daily folder**: `YYYY-MM-DD/` derived from the media timestamp.
+- **Per media item**: `YYYY-MM-DD/<media_id>/` containing:
+  - `meta.json`: full API response for that media item (id, timestamp, permalink, media_type, children, etc.).
+  - `caption.txt`: caption text if present, otherwise empty.
+  - Media files named deterministically:
+    - Single image/video: `media_01.<ext>`.
+    - Carousel children: `child_01.<ext>`, `child_02.<ext>`, ... using the file extension from the download URL.
+- **State tracking**: `state.json` at the root stores `last_saved_media_id`, `last_run_iso`, and a list of `processed_ids` to avoid reprocessing.
+
+Re-running the script is safe and idempotent:
+- Media downloads are skipped when the target file already exists.
+- Items whose IDs already appear in `state.json` are skipped.
+- The crawler stops once it reaches the `last_saved_media_id` marker recorded in `state.json`.
 
 ## Automation
 Add a cron entry (runs daily at 2:15 AM):
 ```
-15 2 * * * cd /path/to/instArchiver && /usr/bin/env IG_USER_ID=... IG_ACCESS_TOKEN=... /usr/bin/python ig_archive.py --output-dir /path/to/archive >> /path/to/archive/cron.log 2>&1
+15 2 * * * cd /path/to/instArchiver && /usr/bin/env IG_USER_ID=... IG_ACCESS_TOKEN=... /usr/bin/python ig_archive.py --output-dir /path/to/InstagramArchive >> /path/to/InstagramArchive/cron.log 2>&1
 ```
 On Windows Task Scheduler, create a basic task that calls `python ig_archive.py` with the environment variables set in the task configuration.
 
