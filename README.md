@@ -21,6 +21,7 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 | `IG_USER_ID` | Yes | Instagram Business/User ID for the linked professional account. |
 | `IG_ACCESS_TOKEN` | Yes | Long-lived user access token for the Graph API. Refresh per Meta guidance. |
 | `IG_API_VERSION` | No | Graph API version (defaults to `v19.0`). |
+| `IG_ARCHIVE_DATA_DIR` | No | Custom output directory for the archive. Takes precedence over `IG_ARCHIVE_DIR` if both are set. |
 | `IG_ARCHIVE_DIR` | No | Output directory for the archive (defaults to `InstagramArchive`). |
 
 > The script never writes token values to disk or console; query parameters containing `token` are redacted in logs.
