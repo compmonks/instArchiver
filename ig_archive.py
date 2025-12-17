@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """Instagram Daily Archive utility using the Instagram Graph API.
+
+This script archives media for an Instagram professional account using only
+documented Graph API endpoints. It does not scrape or automate any UI flows
+and requires you to supply a valid long-lived user access token. All token
+values are read from environment variables and redacted from logs.
 """
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
@@ -20,6 +25,8 @@ import requests
 DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v19.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
 STATE_FILENAME = "state.json"
+
+JsonDict = Dict[str, Any]
 
 # IG User Media edge request fields required to archive the feed.
 # This follows Meta's documentation for GET /{ig-user-id}/media to fetch a
@@ -33,6 +40,7 @@ class ArchiveError(Exception):
 
 
 def parse_args() -> argparse.Namespace:
+    """Define CLI arguments and subcommands."""
     parser = argparse.ArgumentParser(description="Archive Instagram media locally.")
     parser.add_argument(
         "--output-dir",
@@ -102,6 +110,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_logging(log_file: Path) -> None:
+    """Configure logging to both file and stdout."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -120,7 +129,16 @@ def get_env_var(name: str) -> str:
     return value
 
 
+def load_credentials() -> tuple[str, str]:
+    """Fetch the Instagram user ID and access token from the environment."""
+
+    user_id = get_env_var("IG_USER_ID")
+    access_token = get_env_var("IG_ACCESS_TOKEN")
+    return user_id, access_token
+
+
 def check_write_permissions(path: Path) -> None:
+    """Verify that the process can create and write files in the path."""
     try:
         path.mkdir(parents=True, exist_ok=True)
         test_file = path / ".write_test"
@@ -130,7 +148,8 @@ def check_write_permissions(path: Path) -> None:
         raise ArchiveError(f"Cannot write to {path}: {exc}") from exc
 
 
-def load_state(output_dir: Path) -> Dict:
+def load_state(output_dir: Path) -> JsonDict:
+    """Load run state from disk (idempotent if state file is missing)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / STATE_FILENAME
     if not state_path.exists():
@@ -151,7 +170,8 @@ def load_state(output_dir: Path) -> Dict:
     return state
 
 
-def save_state(output_dir: Path, state: Dict) -> None:
+def save_state(output_dir: Path, state: JsonDict) -> None:
+    """Persist run state to disk with an updated timestamp."""
     state_path = output_dir / STATE_FILENAME
     state["last_run_iso"] = datetime.utcnow().isoformat()
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -262,7 +282,8 @@ def safe_error_context(exc: Exception) -> str:
     return str(exc)
 
 
-def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> Dict:
+def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> JsonDict:
+    """Perform a GET request with retry handling for transient errors."""
     backoff = 1.5
     session = requests.Session()
     for attempt in range(1, max_attempts + 1):
@@ -303,7 +324,7 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
     raise ArchiveError("Unreachable code reached in request_with_retry")
 
 
-def fetch_media_page(url: str, params: Optional[Dict[str, str]]) -> Dict:
+def fetch_media_page(url: str, params: Optional[Dict[str, str]]) -> JsonDict:
     return request_with_retry(url, params or {})
 
 
@@ -391,14 +412,15 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
     return None
 
 
-def save_metadata(media_dir: Path, metadata: Dict) -> None:
+def save_metadata(media_dir: Path, metadata: JsonDict) -> None:
     metadata_path = media_dir / "meta.json"
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     caption = metadata.get("caption") or ""
     (media_dir / "caption.txt").write_text(caption, encoding="utf-8")
 
 
-def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
+def archive_children(media_dir: Path, children: Iterable[JsonDict]) -> List[str]:
+    """Download carousel children media into the media directory."""
     ordered_children = sorted(
         list(children),
         key=lambda child: (
@@ -419,13 +441,14 @@ def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
     return downloaded
 
 
-def fetch_carousel_children(media_id: str, access_token: str) -> List[Dict]:
+def fetch_carousel_children(media_id: str, access_token: str) -> List[JsonDict]:
+    """Fetch carousel children using the `/children` edge for a media item."""
     url = f"{GRAPH_API_BASE}/{media_id}/children"
     params: Optional[Dict[str, str]] = {
         "fields": CHILDREN_FIELDS,
         "access_token": access_token,
     }
-    children: List[Dict] = []
+    children: List[JsonDict] = []
 
     while url:
         payload = fetch_media_page(url, params)
@@ -437,7 +460,8 @@ def fetch_carousel_children(media_id: str, access_token: str) -> List[Dict]:
     return children
 
 
-def archive_media_item(base_dir: Path, media: Dict, access_token: str) -> None:
+def archive_media_item(base_dir: Path, media: JsonDict, access_token: str) -> None:
+    """Persist metadata and download media (including carousel children)."""
     media_id = media["id"]
     timestamp = media.get("timestamp") or ""
     if not timestamp:
@@ -474,6 +498,7 @@ def archive(
     max_pages: Optional[int],
     stop_at_last_saved: bool,
 ) -> None:
+    """Archive media for the configured Instagram user."""
     state = load_state(output_dir)
     last_saved_id = state.get("last_saved_media_id")
     processed_ids = set(state.get("processed_ids", []))
@@ -538,8 +563,8 @@ def archive(
 
 
 def run_doctor(output_dir: Path, log_file: Path) -> None:
-    user_id = get_env_var("IG_USER_ID")
-    access_token = get_env_var("IG_ACCESS_TOKEN")
+    """Validate environment variables, token, and filesystem permissions."""
+    user_id, access_token = load_credentials()
 
     check_write_permissions(output_dir)
     check_write_permissions(log_file.parent)
@@ -573,8 +598,7 @@ def main() -> None:
         return
 
     try:
-        user_id = get_env_var("IG_USER_ID")
-        access_token = get_env_var("IG_ACCESS_TOKEN")
+        user_id, access_token = load_credentials()
         validate_access_token(user_id, access_token)
     except ArchiveError as exc:
         logging.error(exc)
