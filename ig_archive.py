@@ -24,6 +24,7 @@ STATE_FILENAME = "state.json"
 # This follows Meta's documentation for GET /{ig-user-id}/media to fetch a
 # user's media along with carousel children details needed for downloads.
 MEDIA_FIELDS = "id,caption,media_type,media_url,permalink,timestamp,children{id,media_url,media_type}"
+CHILDREN_FIELDS = "id,media_type,media_url,thumbnail_url,timestamp"
 
 
 class ArchiveError(Exception):
@@ -183,8 +184,15 @@ def save_metadata(media_dir: Path, metadata: Dict) -> None:
 
 
 def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
+    ordered_children = sorted(
+        list(children),
+        key=lambda child: (
+            child.get("timestamp") or "",
+            child.get("id") or "",
+        ),
+    )
     downloaded: List[str] = []
-    for index, child in enumerate(children, start=1):
+    for index, child in enumerate(ordered_children, start=1):
         url = child.get("media_url") or child.get("thumbnail_url")
         if not url:
             logging.warning("Child %s has no downloadable URL; skipping.", child.get("id"))
@@ -196,7 +204,25 @@ def archive_children(media_dir: Path, children: Iterable[Dict]) -> List[str]:
     return downloaded
 
 
-def archive_media_item(base_dir: Path, media: Dict) -> None:
+def fetch_carousel_children(media_id: str, access_token: str) -> List[Dict]:
+    url = f"{GRAPH_API_BASE}/{media_id}/children"
+    params: Optional[Dict[str, str]] = {
+        "fields": CHILDREN_FIELDS,
+        "access_token": access_token,
+    }
+    children: List[Dict] = []
+
+    while url:
+        payload = fetch_media_page(url, params)
+        params = None
+        children.extend(payload.get("data", []))
+        paging = payload.get("paging", {})
+        url = paging.get("next") if isinstance(paging, dict) else None
+
+    return children
+
+
+def archive_media_item(base_dir: Path, media: Dict, access_token: str) -> None:
     media_id = media["id"]
     timestamp = media.get("timestamp") or ""
     if not timestamp:
@@ -213,10 +239,17 @@ def archive_media_item(base_dir: Path, media: Dict) -> None:
     else:
         logging.warning("No media_url/thumbnail_url for %s; metadata saved only.", media_id)
 
-    children = media.get("children", {}).get("data", []) if isinstance(media.get("children"), dict) else []
-    if children:
-        logging.info("Archiving %s children for carousel %s", len(children), media_id)
-        archive_children(media_dir, children)
+    is_carousel = media.get("media_type") == "CAROUSEL_ALBUM"
+    children_payload = media.get("children") if isinstance(media.get("children"), dict) else {}
+    children_data = children_payload.get("data", []) if isinstance(children_payload, dict) else []
+
+    if is_carousel and not children_data:
+        logging.info("Fetching carousel children for %s via children edge", media_id)
+        children_data = fetch_carousel_children(media_id, access_token)
+
+    if children_data:
+        logging.info("Archiving %s children for carousel %s", len(children_data), media_id)
+        archive_children(media_dir, children_data)
 
 
 def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, max_pages: Optional[int]) -> None:
@@ -266,7 +299,7 @@ def archive(user_id: str, access_token: str, output_dir: Path, page_size: int, m
                 reached_existing = True
                 logging.info("Reached previously archived media id %s; stopping.", media_id)
                 break
-            archive_media_item(output_dir, media)
+            archive_media_item(output_dir, media, access_token)
             processed_ids.add(media_id)
 
         paging = payload.get("paging", {})
