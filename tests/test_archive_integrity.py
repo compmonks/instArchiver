@@ -80,6 +80,9 @@ class ArchiveIntegrityTests(unittest.TestCase):
             self.run_archive([{"data": [item]}])
         fetch.assert_called_once_with("new", "dummy-token")
         self.assertEqual(download.call_count, 3)
+        stored = json.loads((self.root / "2026-10-20" / "new" / "meta.json").read_text())
+        self.assertEqual(stored["children"]["data"], children)
+        self.assertNotIn("paging", stored["children"])
 
     def test_children_edge_pagination_is_exhausted(self):
         with patch.object(archive, "fetch_media_page", side_effect=[
@@ -182,10 +185,47 @@ class ArchiveIntegrityTests(unittest.TestCase):
         response.__exit__ = Mock(return_value=False)
         response.iter_content.return_value = []
         dest = self.root / "empty.jpg"
-        with patch.object(archive.requests, "get", return_value=response):
-            with self.assertRaises(archive.ArchiveError):
-                archive.download_file("https://example.invalid/empty.jpg", dest)
+        with patch.object(archive.requests, "get", return_value=response) as get, \
+             patch.object(archive.time, "sleep"):
+            self.assertIsNone(archive.download_file("https://example.invalid/empty.jpg", dest,
+                                                  max_attempts=2))
+        self.assertEqual(get.call_count, 2)
         self.assertFalse(dest.exists())
+
+    def test_empty_response_then_success_uses_download_retry_budget(self):
+        response = Mock()
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.iter_content.side_effect = [[], [b"complete-image"]]
+        dest = self.root / "retry.jpg"
+        with patch.object(archive.requests, "get", return_value=response) as get, \
+             patch.object(archive.time, "sleep"):
+            result = archive.download_file("https://example.invalid/retry.jpg", dest,
+                                           max_attempts=2)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(result, dest)
+        self.assertEqual(dest.read_bytes(), b"complete-image")
+
+    def test_recovery_reuses_inferred_extension_without_http(self):
+        dest = self.root / "media_01"
+        completed = dest.with_suffix(".jpg")
+        completed.write_bytes(b"previously-completed")
+        dest.with_suffix(".png.part").write_bytes(b"partial")
+        with patch.object(archive.requests, "get") as get:
+            result = archive.download_file("https://example.invalid/expired-url", dest)
+        get.assert_not_called()
+        self.assertEqual(result, completed)
+        self.assertEqual(completed.read_bytes(), b"previously-completed")
+
+    def test_recovery_refuses_ambiguous_completed_files(self):
+        dest = self.root / "media_01"
+        dest.with_suffix(".jpg").write_bytes(b"one")
+        dest.with_suffix(".png").write_bytes(b"two")
+        with patch.object(archive.requests, "get") as get:
+            with self.assertRaises(archive.ArchiveError):
+                archive.download_file("https://example.invalid/expired-url", dest)
+        get.assert_not_called()
 
 
 if __name__ == "__main__":

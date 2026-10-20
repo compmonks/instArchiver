@@ -387,6 +387,20 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
     except OSError as exc:
         logging.warning("Could not check existing file %s: %s", dest, exc)
 
+    if not dest.suffix:
+        # Recovery must not depend on an unexpired CDN URL just to rediscover
+        # the extension of a file that was already completely downloaded.
+        completed = [
+            candidate for candidate in dest.parent.glob(dest.name + ".*")
+            if candidate.suffix != ".part" and candidate.is_file()
+            and candidate.stat().st_size > 0
+        ]
+        if len(completed) == 1:
+            logging.info("File %s already exists; skipping download.", completed[0])
+            return completed[0]
+        if len(completed) > 1:
+            raise ArchiveError(f"Multiple completed files for {dest}; inspect before retrying.")
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     backoff = 1.5
 
@@ -410,7 +424,7 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
                         if chunk:
                             handle.write(chunk)
                 if tmp_path.stat().st_size == 0:
-                    raise ArchiveError("Download returned an empty file.")
+                    raise requests.RequestException("Download returned an empty file.")
                 tmp_path.replace(final_dest)
                 logging.info("Downloaded %s -> %s", url, final_dest)
                 return final_dest
@@ -511,6 +525,9 @@ def archive_media_item(base_dir: Path, media: JsonDict, access_token: str) -> No
     ):
         logging.info("Fetching carousel children for %s via children edge", media_id)
         children_data = fetch_carousel_children(media_id, access_token)
+        complete_children = dict(children_payload, data=children_data)
+        complete_children.pop("paging", None)
+        save_metadata(media_dir, dict(media, children=complete_children))
 
     if is_carousel and not children_data:
         raise ArchiveError(f"Carousel {media_id} has no downloadable children.")
