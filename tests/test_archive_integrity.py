@@ -116,6 +116,29 @@ class ArchiveIntegrityTests(unittest.TestCase):
             self.run_archive([first, {"data": []}])
         self.assertEqual(archive.load_state(self.root)["last_saved_media_id"], "new")
 
+    def test_empty_intermediate_page_follows_next_cursor(self):
+        pages = [
+            {"data": [media()], "paging": {"next": "https://example.invalid/empty"}},
+            {"data": [], "paging": {"next": "https://example.invalid/older"}},
+            {"data": [media("middle"), media("old")]},
+        ]
+        with patch.object(archive, "download_file", return_value=self.root / "image.jpg"):
+            fetch = self.run_archive(pages)
+        self.assertEqual(fetch.call_count, 3)
+        state = archive.load_state(self.root)
+        self.assertIn("middle", state["processed_ids"])
+        self.assertEqual(state["last_saved_media_id"], "new")
+
+    def test_page_cap_counts_empty_pages_and_preserves_old_marker(self):
+        pages = [
+            {"data": [media()], "paging": {"next": "https://example.invalid/empty"}},
+            {"data": [], "paging": {"next": "https://example.invalid/older"}},
+        ]
+        with patch.object(archive, "download_file", return_value=self.root / "image.jpg"):
+            fetch = self.run_archive(pages, max_pages=2)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(archive.load_state(self.root)["last_saved_media_id"], "old")
+
     def test_state_replace_failure_preserves_old_file_and_cleans_temp(self):
         state = dict(self.old_state, processed_ids=["new", "old"])
         before = self.state_path.read_bytes()

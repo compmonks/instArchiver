@@ -556,9 +556,7 @@ def archive(
         params = None  # Subsequent requests use the fully qualified paging.next URL.
         media_list = payload.get("data", [])
         if not media_list:
-            logging.info("No more media returned by API.")
-            current_url = None
-            break
+            logging.info("API page has no media; checking its continuation cursor.")
 
         pages_fetched += 1
         logging.info("Fetched page %s with %s items.", pages_fetched, len(media_list))
