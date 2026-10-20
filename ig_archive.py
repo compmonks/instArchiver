@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -176,10 +177,24 @@ def load_state(output_dir: Path) -> JsonDict:
 
 
 def save_state(output_dir: Path, state: JsonDict) -> None:
-    """Persist run state to disk with an updated timestamp."""
+    """Atomically replace run state, preserving the previous file on failure."""
     state_path = output_dir / STATE_FILENAME
-    state["last_run_iso"] = datetime.utcnow().isoformat()
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    saved_state = dict(state, last_run_iso=datetime.utcnow().isoformat())
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output_dir,
+            prefix=".state-", suffix=".tmp", delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            json.dump(saved_state, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(state_path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+    state.update(saved_state)
 
 
 def validate_access_token(user_id: str, access_token: str) -> None:
@@ -372,6 +387,20 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
     except OSError as exc:
         logging.warning("Could not check existing file %s: %s", dest, exc)
 
+    if not dest.suffix:
+        # Recovery must not depend on an unexpired CDN URL just to rediscover
+        # the extension of a file that was already completely downloaded.
+        completed = [
+            candidate for candidate in dest.parent.glob(dest.name + ".*")
+            if candidate.suffix != ".part" and candidate.is_file()
+            and candidate.stat().st_size > 0
+        ]
+        if len(completed) == 1:
+            logging.info("File %s already exists; skipping download.", completed[0])
+            return completed[0]
+        if len(completed) > 1:
+            raise ArchiveError(f"Multiple completed files for {dest}; inspect before retrying.")
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     backoff = 1.5
 
@@ -394,6 +423,8 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
                     for chunk in resp.iter_content(chunk_size=8192):
                         if chunk:
                             handle.write(chunk)
+                if tmp_path.stat().st_size == 0:
+                    raise requests.RequestException("Download returned an empty file.")
                 tmp_path.replace(final_dest)
                 logging.info("Downloaded %s -> %s", url, final_dest)
                 return final_dest
@@ -437,12 +468,13 @@ def archive_children(media_dir: Path, children: Iterable[JsonDict]) -> List[str]
     for index, child in enumerate(ordered_children, start=1):
         url = child.get("media_url") or child.get("thumbnail_url")
         if not url:
-            logging.warning("Child %s has no downloadable URL; skipping.", child.get("id"))
-            continue
+            raise ArchiveError(f"Child {child.get('id')} has no downloadable URL.")
         dest = media_dir / f"child_{index:02d}"
         downloaded_path = download_file(url, dest)
         if downloaded_path:
             downloaded.append(str(downloaded_path))
+        else:
+            raise ArchiveError(f"Download incomplete for child {child.get('id')}.")
     return downloaded
 
 
@@ -470,25 +502,35 @@ def archive_media_item(base_dir: Path, media: JsonDict, access_token: str) -> No
     media_id = media["id"]
     timestamp = media.get("timestamp") or ""
     if not timestamp:
-        logging.warning("Skipping media %s without timestamp.", media_id)
-        return
+        raise ArchiveError(f"Media {media_id} has no timestamp.")
 
     media_dir = ensure_media_dir(base_dir, timestamp, media_id)
     save_metadata(media_dir, media)
 
     download_target = media.get("media_url") or media.get("thumbnail_url")
-    if download_target:
-        download_file(download_target, media_dir / "media_01")
-    else:
-        logging.warning("No media_url/thumbnail_url for %s; metadata saved only.", media_id)
-
     is_carousel = media.get("media_type") == "CAROUSEL_ALBUM"
+    if download_target:
+        if download_file(download_target, media_dir / "media_01") is None:
+            raise ArchiveError(f"Download incomplete for media {media_id}.")
+    elif not is_carousel:
+        raise ArchiveError(f"Media {media_id} has no downloadable URL.")
+
     children_payload = media.get("children") if isinstance(media.get("children"), dict) else {}
     children_data = children_payload.get("data", []) if isinstance(children_payload, dict) else []
 
-    if is_carousel and not children_data:
+    # Embedded children may be paginated; fetch the full edge in that case.
+    children_paging = children_payload.get("paging", {})
+    if is_carousel and (
+        not children_data or (isinstance(children_paging, dict) and children_paging.get("next"))
+    ):
         logging.info("Fetching carousel children for %s via children edge", media_id)
         children_data = fetch_carousel_children(media_id, access_token)
+        complete_children = dict(children_payload, data=children_data)
+        complete_children.pop("paging", None)
+        save_metadata(media_dir, dict(media, children=complete_children))
+
+    if is_carousel and not children_data:
+        raise ArchiveError(f"Carousel {media_id} has no downloadable children.")
 
     if children_data:
         logging.info("Archiving %s children for carousel %s", len(children_data), media_id)
@@ -531,8 +573,7 @@ def archive(
         params = None  # Subsequent requests use the fully qualified paging.next URL.
         media_list = payload.get("data", [])
         if not media_list:
-            logging.info("No more media returned by API.")
-            break
+            logging.info("API page has no media; checking its continuation cursor.")
 
         pages_fetched += 1
         logging.info("Fetched page %s with %s items.", pages_fetched, len(media_list))
@@ -543,13 +584,13 @@ def archive(
                 continue
             if new_latest_id is None:
                 new_latest_id = media_id
-            if media_id in processed_ids:
-                logging.info("Media %s already processed; skipping.", media_id)
-                continue
             if stop_at_last_saved and last_saved_id and media_id == last_saved_id:
                 reached_existing = True
                 logging.info("Reached previously archived media id %s; stopping.", media_id)
                 break
+            if media_id in processed_ids:
+                logging.info("Media %s already processed; skipping.", media_id)
+                continue
             archive_media_item(output_dir, media, access_token)
             processed_ids.add(media_id)
 
@@ -559,7 +600,9 @@ def archive(
         if reached_existing or not current_url:
             break
 
-    if new_latest_id:
+    # A page cap must not move the stop marker past older, unvisited media.
+    # Completed IDs are still saved, so the next run can reuse these downloads.
+    if new_latest_id and (reached_existing or not current_url):
         state["last_saved_media_id"] = new_latest_id
         logging.info("Updated state marker to %s", new_latest_id)
 

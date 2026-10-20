@@ -78,6 +78,28 @@ InstagramArchive/
 ```
 Re-running is safe: files are skipped if they already exist and the crawler stops when it reaches the previously saved media ID (when `--since-last` is used).
 
+Download failures, missing required media information and incomplete carousels
+abort the run without advancing `state.json`. Completed files can be reused on
+the next run. Embedded carousel pagination is followed through the full children
+edge, and the complete fetched child metadata is stored with the parent. A
+page-capped run records completed IDs but keeps the previous stop marker
+while older pages remain unvisited. State is replaced atomically, so a failed
+write does not truncate the previous checkpoint.
+
+These guards apply to future runs. Older state may already mark incomplete posts
+as processed; this change does not audit or repair existing archives. Run only one
+archiver per output directory. Existing nonempty files are trusted without a
+checksum; a single completed extension-bearing file can be reused without HTTP,
+while multiple candidates require inspection. Empty download responses use the
+normal retry budget. Filesystem replacement does not guarantee survival of power loss.
+
+## Offline tests
+
+After installing `requests`, run `python -m unittest discover -s tests -v`.
+The suite uses temporary archive fixtures and mocked HTTP; it needs no Instagram
+account or token and makes no live API/download calls. CI runs it on Python 3.11
+and 3.12. It does not validate live API compatibility or historical archive data.
+
 ## Scheduling
 Example cron entry (daily at 02:15 UTC):
 ```
