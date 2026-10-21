@@ -13,6 +13,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sys
 import tempfile
 import time
@@ -224,7 +225,7 @@ def validate_access_token(user_id: str, access_token: str) -> None:
         raise ArchiveError("Unexpected response during token validation.") from exc
 
     if "error" in data:
-        message = data.get("error", {}).get("message") or "Unknown error"
+        message = safe_api_error_message(data["error"], response.status_code)
         raise ArchiveError(f"Access token validation failed: {message}")
 
     resolved_id = data.get("id")
@@ -266,8 +267,8 @@ def exchange_short_lived_token(
         raise ArchiveError("Unexpected response during token exchange.") from exc
 
     if not response.ok:
-        error_message = data.get("error", {}).get("message") if isinstance(data, dict) else None
-        message = error_message or f"HTTP {response.status_code} during token exchange"
+        error = data.get("error") if isinstance(data, dict) else None
+        message = safe_api_error_message(error, response.status_code)
         raise ArchiveError(message)
 
     if "access_token" not in data:
@@ -276,17 +277,40 @@ def exchange_short_lived_token(
     return data
 
 
+REDACTED_VALUE = "<redacted>"
+SAFE_ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
+
+
+def redact_url_query(url: str) -> str:
+    """Retain a safe URL outline without persisting credential-bearing values."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "<malformed-url>"
+        hostname = parsed.hostname
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        redacted_query = [(key, REDACTED_VALUE) for key, _value in query]
+        sanitized_query = urlencode(redacted_query, doseq=True)
+        sanitized_path = "/<redacted-path>" if parsed.path not in {"", "/"} else parsed.path
+        sanitized = parsed._replace(
+            netloc=netloc,
+            path=sanitized_path,
+            query=sanitized_query,
+            fragment="",
+        )
+        return urlunparse(sanitized)
+    except (TypeError, ValueError):
+        return "<malformed-url>"
+
+
 def redact_tokens(url: str) -> str:
-    parsed = urlparse(url)
-    query = parse_qsl(parsed.query, keep_blank_values=True)
-    redacted_query = [
-        (key, value)
-        for key, value in query
-        if "token" not in key.lower()
-    ]
-    sanitized_query = urlencode(redacted_query, doseq=True)
-    sanitized = parsed._replace(query=sanitized_query)
-    return urlunparse(sanitized)
+    """Backward-compatible alias for callers of the original helper."""
+    return redact_url_query(url)
 
 
 def safe_error_context(exc: Exception) -> str:
@@ -297,9 +321,25 @@ def safe_error_context(exc: Exception) -> str:
         if status:
             parts.append(f"status {status}")
         if request_url:
-            parts.append(f"url {redact_tokens(request_url)}")
+            parts.append(f"url {redact_url_query(request_url)}")
         return "; ".join(parts) or exc.__class__.__name__
-    return str(exc)
+    if isinstance(exc, ArchiveError):
+        return str(exc)
+    return exc.__class__.__name__
+
+
+def safe_api_error_message(error: object, status_code: int) -> str:
+    """Return useful API error metadata without persisting a raw response body."""
+    if not isinstance(error, dict):
+        return f"HTTP {status_code}"
+    parts = []
+    error_type = error.get("type")
+    if isinstance(error_type, str) and SAFE_ERROR_TYPE.fullmatch(error_type):
+        parts.append(error_type)
+    error_code = error.get("code")
+    if isinstance(error_code, int) and not isinstance(error_code, bool):
+        parts.append(f"code {error_code}")
+    return ": ".join(parts) or f"HTTP {status_code}"
 
 
 def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> JsonDict:
@@ -312,7 +352,7 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 logging.warning(
                     "Request to %s failed with status %s (attempt %s/%s).",
-                    redact_tokens(url),
+                    redact_url_query(url),
                     response.status_code,
                     attempt,
                     max_attempts,
@@ -320,17 +360,15 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
                 raise ArchiveError("Temporary API error")
 
             if not response.ok:
-                error_message = None
                 try:
-                    error_message = response.json().get("error", {}).get("message")
+                    error = response.json().get("error")
                 except ValueError:
-                    error_message = response.text or None
-                message = error_message or f"HTTP {response.status_code}"
-                raise ArchiveError(message)
+                    error = None
+                raise ArchiveError(safe_api_error_message(error, response.status_code))
 
             data = response.json()
             if "error" in data:
-                raise ArchiveError(str(data["error"]))
+                raise ArchiveError(safe_api_error_message(data["error"], response.status_code))
             return data
         except (requests.RequestException, ArchiveError) as exc:  # noqa: PERF203
             if attempt == max_attempts:
@@ -426,15 +464,15 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
                 if tmp_path.stat().st_size == 0:
                     raise requests.RequestException("Download returned an empty file.")
                 tmp_path.replace(final_dest)
-                logging.info("Downloaded %s -> %s", url, final_dest)
+                logging.info("Downloaded %s -> %s", redact_url_query(url), final_dest)
                 return final_dest
         except requests.RequestException as exc:
             logging.warning(
                 "Download failed for %s (attempt %s/%s): %s",
-                url,
+                redact_url_query(url),
                 attempt,
                 max_attempts,
-                exc,
+                safe_error_context(exc),
             )
             if attempt < max_attempts:
                 sleep_time = backoff ** attempt
@@ -444,7 +482,11 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
             logging.error("Failed to write %s: %s", dest, exc)
             break
 
-    logging.error("Giving up on downloading %s after %s attempts.", url, max_attempts)
+    logging.error(
+        "Giving up on downloading %s after %s attempts.",
+        redact_url_query(url),
+        max_attempts,
+    )
     return None
 
 

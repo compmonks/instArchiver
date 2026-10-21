@@ -227,6 +227,142 @@ class ArchiveIntegrityTests(unittest.TestCase):
                 archive.download_file("https://example.invalid/expired-url", dest)
         get.assert_not_called()
 
+    def test_url_redaction_removes_all_query_values(self):
+        url = (
+            "https://user:DUMMY_USERINFO@cdn.example.invalid/"
+            "DUMMY_PATH_SIGNATURE?client_secret=DUMMY_SECRET&"
+            "token=DUMMY_TOKEN&Signature=DUMMY_SIGNATURE&width=1080"
+            "#access_token=DUMMY_FRAGMENT"
+        )
+        sanitized = archive.redact_url_query(url)
+        for value in (
+            "user", "DUMMY_USERINFO", "DUMMY_PATH_SIGNATURE", "DUMMY_SECRET",
+            "DUMMY_TOKEN", "DUMMY_SIGNATURE", "1080", "DUMMY_FRAGMENT",
+        ):
+            self.assertNotIn(value, sanitized)
+        self.assertEqual(sanitized.split("/", 3)[:3], ["https:", "", "cdn.example.invalid"])
+        self.assertIn("/<redacted-path>?", sanitized)
+        self.assertIn("client_secret=%3Credacted%3E", sanitized)
+        self.assertIn("width=%3Credacted%3E", sanitized)
+
+    def test_request_exception_context_redacts_secret_and_signed_query(self):
+        request = archive.requests.Request(
+            "GET",
+            "https://example.invalid/token?client_secret=DUMMY_SECRET&"
+            "access_token=DUMMY_TOKEN&Signature=DUMMY_SIGNATURE",
+        ).prepare()
+        context = archive.safe_error_context(
+            archive.requests.ConnectionError("simulated", request=request)
+        )
+        for value in ("DUMMY_SECRET", "DUMMY_TOKEN", "DUMMY_SIGNATURE"):
+            self.assertNotIn(value, context)
+        self.assertIn("url https://example.invalid/<redacted-path>?", context)
+
+    def test_download_logs_never_include_signed_query_values(self):
+        response = Mock()
+        response.headers = {"Content-Type": "image/jpeg"}
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.iter_content.return_value = [b"complete-image"]
+        url = (
+            "https://cdn.example.invalid/image.jpg?client_secret=DUMMY_SECRET&"
+            "token=DUMMY_TOKEN&Signature=DUMMY_SIGNATURE"
+        )
+        with patch.object(archive.requests, "get", return_value=response), \
+             self.assertLogs(level="INFO") as captured:
+            self.assertEqual(archive.download_file(url, self.root / "image.jpg"),
+                             self.root / "image.jpg")
+        logs = "\n".join(captured.output)
+        for value in ("DUMMY_SECRET", "DUMMY_TOKEN", "DUMMY_SIGNATURE"):
+            self.assertNotIn(value, logs)
+        self.assertIn("%3Credacted%3E", logs)
+
+    def test_api_error_body_is_sanitized_before_archive_error(self):
+        response = Mock(ok=False, status_code=400)
+        response.json.return_value = {
+            "error": {
+                "type": "OAuthException",
+                "code": 190,
+                "message": (
+                    "Authorization: Bearer DUMMY_BEARER "
+                    "https://example.invalid/?oh=DUMMY_SIGNATURE"
+                ),
+            }
+        }
+        session = Mock()
+        session.get.return_value = response
+        with patch.object(archive.requests, "Session", return_value=session), \
+             self.assertRaises(archive.ArchiveError) as raised:
+            archive.request_with_retry("https://example.invalid", {}, max_attempts=1)
+        self.assertNotIn("DUMMY_BEARER", str(raised.exception))
+        self.assertNotIn("DUMMY_SIGNATURE", str(raised.exception))
+        self.assertIn("OAuthException: code 190", str(raised.exception))
+
+    def test_non_json_error_body_is_not_persisted(self):
+        response = Mock(ok=False, status_code=400, text="DUMMY_RESPONSE_SECRET")
+        response.json.side_effect = ValueError("not json")
+        session = Mock()
+        session.get.return_value = response
+        with patch.object(archive.requests, "Session", return_value=session), \
+             self.assertRaises(archive.ArchiveError) as raised:
+            archive.request_with_retry("https://example.invalid", {}, max_attempts=1)
+        self.assertNotIn("DUMMY_RESPONSE_SECRET", str(raised.exception))
+        self.assertIn("HTTP 400", str(raised.exception))
+
+    def test_api_error_metadata_is_constrained_before_logging(self):
+        error = {
+            "type": {"access_token": "DUMMY_TYPE_SECRET"},
+            "code": "DUMMY_CODE_SECRET",
+            "message": "DUMMY_MESSAGE_SECRET",
+        }
+        sanitized = archive.safe_api_error_message(error, 400)
+        self.assertEqual(sanitized, "HTTP 400")
+        for value in ("DUMMY_TYPE_SECRET", "DUMMY_CODE_SECRET", "DUMMY_MESSAGE_SECRET"):
+            self.assertNotIn(value, sanitized)
+
+        self.assertEqual(
+            archive.safe_api_error_message(
+                {"type": "OAuthException", "code": 190}, 400
+            ),
+            "OAuthException: code 190",
+        )
+
+    def test_token_helpers_sanitize_structured_api_errors(self):
+        response = Mock(ok=False, status_code=400)
+        response.json.return_value = {
+            "error": {
+                "type": "OAuthException",
+                "code": 190,
+                "message": "client_secret=DUMMY_SECRET access_token=DUMMY_TOKEN",
+            }
+        }
+        with patch.object(archive.requests, "get", return_value=response):
+            for operation in (
+                lambda: archive.validate_access_token("user", "dummy-token"),
+                lambda: archive.exchange_short_lived_token(
+                    "dummy-short-token", "dummy-app", "DUMMY_SECRET"
+                ),
+            ):
+                with self.subTest(operation=operation), \
+                     self.assertRaises(archive.ArchiveError) as raised:
+                    operation()
+                self.assertNotIn("DUMMY_SECRET", str(raised.exception))
+                self.assertNotIn("DUMMY_TOKEN", str(raised.exception))
+                self.assertIn("OAuthException: code 190", str(raised.exception))
+
+    def test_malformed_download_url_fails_closed_without_crashing_redaction(self):
+        malformed_url = "http://["
+        self.assertEqual(archive.redact_url_query(malformed_url), "<malformed-url>")
+        with patch.object(
+            archive.requests,
+            "get",
+            side_effect=archive.requests.ConnectionError("simulated"),
+        ), self.assertLogs(level="WARNING") as captured:
+            self.assertIsNone(
+                archive.download_file(malformed_url, self.root / "image.jpg", max_attempts=1)
+            )
+        self.assertIn("<malformed-url>", "\n".join(captured.output))
+
 
 if __name__ == "__main__":
     unittest.main()
