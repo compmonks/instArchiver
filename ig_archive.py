@@ -13,6 +13,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sys
 import tempfile
 import time
@@ -277,16 +278,31 @@ def exchange_short_lived_token(
 
 
 REDACTED_VALUE = "<redacted>"
+SAFE_ERROR_TYPE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 
 
 def redact_url_query(url: str) -> str:
-    """Preserve URL structure while removing every query parameter value."""
+    """Retain a safe URL outline without persisting credential-bearing values."""
     try:
         parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return "<malformed-url>"
+        hostname = parsed.hostname
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
         query = parse_qsl(parsed.query, keep_blank_values=True)
         redacted_query = [(key, REDACTED_VALUE) for key, _value in query]
         sanitized_query = urlencode(redacted_query, doseq=True)
-        sanitized = parsed._replace(query=sanitized_query)
+        sanitized_path = "/<redacted-path>" if parsed.path not in {"", "/"} else parsed.path
+        sanitized = parsed._replace(
+            netloc=netloc,
+            path=sanitized_path,
+            query=sanitized_query,
+            fragment="",
+        )
         return urlunparse(sanitized)
     except (TypeError, ValueError):
         return "<malformed-url>"
@@ -317,10 +333,12 @@ def safe_api_error_message(error: object, status_code: int) -> str:
     if not isinstance(error, dict):
         return f"HTTP {status_code}"
     parts = []
-    if error.get("type"):
-        parts.append(str(error["type"]))
-    if error.get("code") is not None:
-        parts.append(f"code {error['code']}")
+    error_type = error.get("type")
+    if isinstance(error_type, str) and SAFE_ERROR_TYPE.fullmatch(error_type):
+        parts.append(error_type)
+    error_code = error.get("code")
+    if isinstance(error_code, int) and not isinstance(error_code, bool):
+        parts.append(f"code {error_code}")
     return ": ".join(parts) or f"HTTP {status_code}"
 
 
