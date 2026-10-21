@@ -27,7 +27,8 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 
 > The script never writes token values to disk or console. Every URL query value
 > is redacted in logs, including app secrets and signed CDN parameters, and raw
-> non-JSON API error bodies are not persisted.
+> API error messages and non-JSON bodies are not persisted. Status, error type
+> and numeric code remain available for diagnostics.
 
 ## Setup
 1. Ensure you have a long-lived token for your professional account. Follow Meta docs to exchange a short-lived token if needed.

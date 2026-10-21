@@ -276,7 +276,10 @@ class ArchiveIntegrityTests(unittest.TestCase):
             "error": {
                 "type": "OAuthException",
                 "code": 190,
-                "message": "failed client_secret=DUMMY_SECRET",
+                "message": (
+                    "Authorization: Bearer DUMMY_BEARER "
+                    "https://example.invalid/?oh=DUMMY_SIGNATURE"
+                ),
             }
         }
         session = Mock()
@@ -284,8 +287,9 @@ class ArchiveIntegrityTests(unittest.TestCase):
         with patch.object(archive.requests, "Session", return_value=session), \
              self.assertRaises(archive.ArchiveError) as raised:
             archive.request_with_retry("https://example.invalid", {}, max_attempts=1)
-        self.assertNotIn("DUMMY_SECRET", str(raised.exception))
-        self.assertIn("client_secret=<redacted>", str(raised.exception))
+        self.assertNotIn("DUMMY_BEARER", str(raised.exception))
+        self.assertNotIn("DUMMY_SIGNATURE", str(raised.exception))
+        self.assertIn("OAuthException: code 190", str(raised.exception))
 
     def test_non_json_error_body_is_not_persisted(self):
         response = Mock(ok=False, status_code=400, text="DUMMY_RESPONSE_SECRET")
@@ -319,7 +323,20 @@ class ArchiveIntegrityTests(unittest.TestCase):
                     operation()
                 self.assertNotIn("DUMMY_SECRET", str(raised.exception))
                 self.assertNotIn("DUMMY_TOKEN", str(raised.exception))
-                self.assertIn("<redacted>", str(raised.exception))
+                self.assertIn("OAuthException: code 190", str(raised.exception))
+
+    def test_malformed_download_url_fails_closed_without_crashing_redaction(self):
+        malformed_url = "http://["
+        self.assertEqual(archive.redact_url_query(malformed_url), "<malformed-url>")
+        with patch.object(
+            archive.requests,
+            "get",
+            side_effect=archive.requests.ConnectionError("simulated"),
+        ), self.assertLogs(level="WARNING") as captured:
+            self.assertIsNone(
+                archive.download_file(malformed_url, self.root / "image.jpg", max_attempts=1)
+            )
+        self.assertIn("<malformed-url>", "\n".join(captured.output))
 
 
 if __name__ == "__main__":

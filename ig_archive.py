@@ -13,7 +13,6 @@ import json
 import logging
 import mimetypes
 import os
-import re
 import sys
 import tempfile
 import time
@@ -278,31 +277,24 @@ def exchange_short_lived_token(
 
 
 REDACTED_VALUE = "<redacted>"
-SENSITIVE_VALUE_PATTERN = re.compile(
-    r"(?i)([\"']?(?:access[_-]?token|fb[_-]?exchange[_-]?token|client[_-]?secret|"
-    r"appsecret_proof|api[_-]?key|authorization|password|passwd|secret|signature)"
-    r"[\"']?\s*[:=]\s*)(?P<quote>[\"']?)[^\"'\s&,;}\]]+(?P=quote)"
-)
 
 
 def redact_url_query(url: str) -> str:
     """Preserve URL structure while removing every query parameter value."""
-    parsed = urlparse(url)
-    query = parse_qsl(parsed.query, keep_blank_values=True)
-    redacted_query = [(key, REDACTED_VALUE) for key, _value in query]
-    sanitized_query = urlencode(redacted_query, doseq=True)
-    sanitized = parsed._replace(query=sanitized_query)
-    return urlunparse(sanitized)
+    try:
+        parsed = urlparse(url)
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        redacted_query = [(key, REDACTED_VALUE) for key, _value in query]
+        sanitized_query = urlencode(redacted_query, doseq=True)
+        sanitized = parsed._replace(query=sanitized_query)
+        return urlunparse(sanitized)
+    except (TypeError, ValueError):
+        return "<malformed-url>"
 
 
 def redact_tokens(url: str) -> str:
     """Backward-compatible alias for callers of the original helper."""
     return redact_url_query(url)
-
-
-def redact_sensitive_text(value: object) -> str:
-    """Redact common credential assignments in API-provided diagnostic text."""
-    return SENSITIVE_VALUE_PATTERN.sub(r"\1<redacted>", str(value))
 
 
 def safe_error_context(exc: Exception) -> str:
@@ -316,7 +308,7 @@ def safe_error_context(exc: Exception) -> str:
             parts.append(f"url {redact_url_query(request_url)}")
         return "; ".join(parts) or exc.__class__.__name__
     if isinstance(exc, ArchiveError):
-        return redact_sensitive_text(exc)
+        return str(exc)
     return exc.__class__.__name__
 
 
@@ -329,8 +321,6 @@ def safe_api_error_message(error: object, status_code: int) -> str:
         parts.append(str(error["type"]))
     if error.get("code") is not None:
         parts.append(f"code {error['code']}")
-    if error.get("message"):
-        parts.append(redact_sensitive_text(error["message"]))
     return ": ".join(parts) or f"HTTP {status_code}"
 
 
