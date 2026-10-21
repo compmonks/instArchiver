@@ -225,7 +225,7 @@ def validate_access_token(user_id: str, access_token: str) -> None:
         raise ArchiveError("Unexpected response during token validation.") from exc
 
     if "error" in data:
-        message = data.get("error", {}).get("message") or "Unknown error"
+        message = safe_api_error_message(data["error"], response.status_code)
         raise ArchiveError(f"Access token validation failed: {message}")
 
     resolved_id = data.get("id")
@@ -267,8 +267,8 @@ def exchange_short_lived_token(
         raise ArchiveError("Unexpected response during token exchange.") from exc
 
     if not response.ok:
-        error_message = data.get("error", {}).get("message") if isinstance(data, dict) else None
-        message = error_message or f"HTTP {response.status_code} during token exchange"
+        error = data.get("error") if isinstance(data, dict) else None
+        message = safe_api_error_message(error, response.status_code)
         raise ArchiveError(message)
 
     if "access_token" not in data:

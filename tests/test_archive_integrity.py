@@ -298,6 +298,29 @@ class ArchiveIntegrityTests(unittest.TestCase):
         self.assertNotIn("DUMMY_RESPONSE_SECRET", str(raised.exception))
         self.assertIn("HTTP 400", str(raised.exception))
 
+    def test_token_helpers_sanitize_structured_api_errors(self):
+        response = Mock(ok=False, status_code=400)
+        response.json.return_value = {
+            "error": {
+                "type": "OAuthException",
+                "code": 190,
+                "message": "client_secret=DUMMY_SECRET access_token=DUMMY_TOKEN",
+            }
+        }
+        with patch.object(archive.requests, "get", return_value=response):
+            for operation in (
+                lambda: archive.validate_access_token("user", "dummy-token"),
+                lambda: archive.exchange_short_lived_token(
+                    "dummy-short-token", "dummy-app", "DUMMY_SECRET"
+                ),
+            ):
+                with self.subTest(operation=operation), \
+                     self.assertRaises(archive.ArchiveError) as raised:
+                    operation()
+                self.assertNotIn("DUMMY_SECRET", str(raised.exception))
+                self.assertNotIn("DUMMY_TOKEN", str(raised.exception))
+                self.assertIn("<redacted>", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
