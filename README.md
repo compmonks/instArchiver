@@ -6,7 +6,8 @@ Lightweight, **official-API-only** archiver for your Instagram professional acco
 - Calls only documented Instagram Graph API endpoints (`/{ig-user-id}/media`, `/{media-id}/children`, and `oauth/access_token`).
 - Saves each media item (and carousel children) to disk with metadata and captions.
 - Idempotent: respects a `state.json` marker so reruns skip already archived posts.
-- Retries with backoff and redacts tokens from logs to keep secrets out of files.
+- Retries with backoff and redacts URL query values from logs to keep signed
+  URLs and credentials out of files.
 
 ## Requirements
 - Python **3.11+**.
@@ -24,7 +25,9 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 | `IG_ARCHIVE_DATA_DIR` | No | Custom output directory for the archive. Takes precedence over `IG_ARCHIVE_DIR` if both are set. |
 | `IG_ARCHIVE_DIR` | No | Output directory for the archive (defaults to `InstagramArchive`). |
 
-> The script never writes token values to disk or console; query parameters containing `token` are redacted in logs.
+> The script never writes token values to disk or console. Every URL query value
+> is redacted in logs, including app secrets and signed CDN parameters, and raw
+> non-JSON API error bodies are not persisted.
 
 ## Setup
 1. Ensure you have a long-lived token for your professional account. Follow Meta docs to exchange a short-lived token if needed.

@@ -13,6 +13,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sys
 import tempfile
 import time
@@ -276,17 +277,32 @@ def exchange_short_lived_token(
     return data
 
 
-def redact_tokens(url: str) -> str:
+REDACTED_VALUE = "<redacted>"
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)([\"']?(?:access[_-]?token|fb[_-]?exchange[_-]?token|client[_-]?secret|"
+    r"appsecret_proof|api[_-]?key|authorization|password|passwd|secret|signature)"
+    r"[\"']?\s*[:=]\s*)(?P<quote>[\"']?)[^\"'\s&,;}\]]+(?P=quote)"
+)
+
+
+def redact_url_query(url: str) -> str:
+    """Preserve URL structure while removing every query parameter value."""
     parsed = urlparse(url)
     query = parse_qsl(parsed.query, keep_blank_values=True)
-    redacted_query = [
-        (key, value)
-        for key, value in query
-        if "token" not in key.lower()
-    ]
+    redacted_query = [(key, REDACTED_VALUE) for key, _value in query]
     sanitized_query = urlencode(redacted_query, doseq=True)
     sanitized = parsed._replace(query=sanitized_query)
     return urlunparse(sanitized)
+
+
+def redact_tokens(url: str) -> str:
+    """Backward-compatible alias for callers of the original helper."""
+    return redact_url_query(url)
+
+
+def redact_sensitive_text(value: object) -> str:
+    """Redact common credential assignments in API-provided diagnostic text."""
+    return SENSITIVE_VALUE_PATTERN.sub(r"\1<redacted>", str(value))
 
 
 def safe_error_context(exc: Exception) -> str:
@@ -297,9 +313,25 @@ def safe_error_context(exc: Exception) -> str:
         if status:
             parts.append(f"status {status}")
         if request_url:
-            parts.append(f"url {redact_tokens(request_url)}")
+            parts.append(f"url {redact_url_query(request_url)}")
         return "; ".join(parts) or exc.__class__.__name__
-    return str(exc)
+    if isinstance(exc, ArchiveError):
+        return redact_sensitive_text(exc)
+    return exc.__class__.__name__
+
+
+def safe_api_error_message(error: object, status_code: int) -> str:
+    """Return useful API error metadata without persisting a raw response body."""
+    if not isinstance(error, dict):
+        return f"HTTP {status_code}"
+    parts = []
+    if error.get("type"):
+        parts.append(str(error["type"]))
+    if error.get("code") is not None:
+        parts.append(f"code {error['code']}")
+    if error.get("message"):
+        parts.append(redact_sensitive_text(error["message"]))
+    return ": ".join(parts) or f"HTTP {status_code}"
 
 
 def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) -> JsonDict:
@@ -312,7 +344,7 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 logging.warning(
                     "Request to %s failed with status %s (attempt %s/%s).",
-                    redact_tokens(url),
+                    redact_url_query(url),
                     response.status_code,
                     attempt,
                     max_attempts,
@@ -320,17 +352,15 @@ def request_with_retry(url: str, params: Dict[str, str], max_attempts: int = 5) 
                 raise ArchiveError("Temporary API error")
 
             if not response.ok:
-                error_message = None
                 try:
-                    error_message = response.json().get("error", {}).get("message")
+                    error = response.json().get("error")
                 except ValueError:
-                    error_message = response.text or None
-                message = error_message or f"HTTP {response.status_code}"
-                raise ArchiveError(message)
+                    error = None
+                raise ArchiveError(safe_api_error_message(error, response.status_code))
 
             data = response.json()
             if "error" in data:
-                raise ArchiveError(str(data["error"]))
+                raise ArchiveError(safe_api_error_message(data["error"], response.status_code))
             return data
         except (requests.RequestException, ArchiveError) as exc:  # noqa: PERF203
             if attempt == max_attempts:
@@ -426,15 +456,15 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
                 if tmp_path.stat().st_size == 0:
                     raise requests.RequestException("Download returned an empty file.")
                 tmp_path.replace(final_dest)
-                logging.info("Downloaded %s -> %s", url, final_dest)
+                logging.info("Downloaded %s -> %s", redact_url_query(url), final_dest)
                 return final_dest
         except requests.RequestException as exc:
             logging.warning(
                 "Download failed for %s (attempt %s/%s): %s",
-                url,
+                redact_url_query(url),
                 attempt,
                 max_attempts,
-                exc,
+                safe_error_context(exc),
             )
             if attempt < max_attempts:
                 sleep_time = backoff ** attempt
@@ -444,7 +474,11 @@ def download_file(url: str, dest: Path, timeout: int = 30, max_attempts: int = 3
             logging.error("Failed to write %s: %s", dest, exc)
             break
 
-    logging.error("Giving up on downloading %s after %s attempts.", url, max_attempts)
+    logging.error(
+        "Giving up on downloading %s after %s attempts.",
+        redact_url_query(url),
+        max_attempts,
+    )
     return None
 
 
