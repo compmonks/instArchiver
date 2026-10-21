@@ -25,10 +25,11 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 | `IG_ARCHIVE_DATA_DIR` | No | Custom output directory for the archive. Takes precedence over `IG_ARCHIVE_DIR` if both are set. |
 | `IG_ARCHIVE_DIR` | No | Output directory for the archive (defaults to `InstagramArchive`). |
 
-> The script never writes token values to disk or console. Every URL query value
-> is redacted in logs, including app secrets and signed CDN parameters, and raw
-> API error messages and non-JSON bodies are not persisted. Status, error type
-> and numeric code remain available for diagnostics.
+> The script never writes token values to disk or console. Logged URLs retain
+> only their origin and query keys; user information, path values, fragments and
+> every query value are removed. Raw API error messages and non-JSON bodies are
+> not persisted. Status, a constrained error type and numeric code remain
+> available for diagnostics.
 
 ## Setup
 1. Ensure you have a long-lived token for your professional account. Follow Meta docs to exchange a short-lived token if needed.
