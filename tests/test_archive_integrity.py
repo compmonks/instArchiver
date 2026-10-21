@@ -229,12 +229,19 @@ class ArchiveIntegrityTests(unittest.TestCase):
 
     def test_url_redaction_removes_all_query_values(self):
         url = (
-            "https://cdn.example.invalid/image.jpg?client_secret=DUMMY_SECRET&"
+            "https://user:DUMMY_USERINFO@cdn.example.invalid/"
+            "DUMMY_PATH_SIGNATURE?client_secret=DUMMY_SECRET&"
             "token=DUMMY_TOKEN&Signature=DUMMY_SIGNATURE&width=1080"
+            "#access_token=DUMMY_FRAGMENT"
         )
         sanitized = archive.redact_url_query(url)
-        for value in ("DUMMY_SECRET", "DUMMY_TOKEN", "DUMMY_SIGNATURE", "1080"):
+        for value in (
+            "user", "DUMMY_USERINFO", "DUMMY_PATH_SIGNATURE", "DUMMY_SECRET",
+            "DUMMY_TOKEN", "DUMMY_SIGNATURE", "1080", "DUMMY_FRAGMENT",
+        ):
             self.assertNotIn(value, sanitized)
+        self.assertEqual(sanitized.split("/", 3)[:3], ["https:", "", "cdn.example.invalid"])
+        self.assertIn("/<redacted-path>?", sanitized)
         self.assertIn("client_secret=%3Credacted%3E", sanitized)
         self.assertIn("width=%3Credacted%3E", sanitized)
 
@@ -249,7 +256,7 @@ class ArchiveIntegrityTests(unittest.TestCase):
         )
         for value in ("DUMMY_SECRET", "DUMMY_TOKEN", "DUMMY_SIGNATURE"):
             self.assertNotIn(value, context)
-        self.assertIn("url https://example.invalid/token?", context)
+        self.assertIn("url https://example.invalid/<redacted-path>?", context)
 
     def test_download_logs_never_include_signed_query_values(self):
         response = Mock()
@@ -301,6 +308,24 @@ class ArchiveIntegrityTests(unittest.TestCase):
             archive.request_with_retry("https://example.invalid", {}, max_attempts=1)
         self.assertNotIn("DUMMY_RESPONSE_SECRET", str(raised.exception))
         self.assertIn("HTTP 400", str(raised.exception))
+
+    def test_api_error_metadata_is_constrained_before_logging(self):
+        error = {
+            "type": {"access_token": "DUMMY_TYPE_SECRET"},
+            "code": "DUMMY_CODE_SECRET",
+            "message": "DUMMY_MESSAGE_SECRET",
+        }
+        sanitized = archive.safe_api_error_message(error, 400)
+        self.assertEqual(sanitized, "HTTP 400")
+        for value in ("DUMMY_TYPE_SECRET", "DUMMY_CODE_SECRET", "DUMMY_MESSAGE_SECRET"):
+            self.assertNotIn(value, sanitized)
+
+        self.assertEqual(
+            archive.safe_api_error_message(
+                {"type": "OAuthException", "code": 190}, 400
+            ),
+            "OAuthException: code 190",
+        )
 
     def test_token_helpers_sanitize_structured_api_errors(self):
         response = Mock(ok=False, status_code=400)
