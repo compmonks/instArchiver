@@ -21,7 +21,7 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 | --- | --- | --- |
 | `IG_USER_ID` | Yes | Instagram Business/User ID for the linked professional account. |
 | `IG_ACCESS_TOKEN` | Yes | Long-lived user access token for the Graph API. Refresh per Meta guidance. |
-| `IG_API_VERSION` | No | Graph API version (defaults to `v19.0`). |
+| `IG_API_VERSION` | No | Graph API version (defaults to `v24.0`). |
 | `IG_ARCHIVE_DATA_DIR` | No | Custom output directory for the archive. Takes precedence over `IG_ARCHIVE_DIR` if both are set. |
 | `IG_ARCHIVE_DIR` | No | Output directory for the archive (defaults to `InstagramArchive`). |
 
@@ -30,6 +30,12 @@ Copy `config.example.env` to `.env` (or export the variables) and fill in the va
 > every query value are removed. Raw API error messages and non-JSON bodies are
 > not persisted. Status, a constrained error type and numeric code remain
 > available for diagnostics.
+
+The previous `v19.0` default expired on 21 May 2026. The new `v24.0`
+default remains supported until 18 February 2028 according to Meta's
+[Graph API version schedule](https://developers.facebook.com/docs/graph-api/changelog/).
+Set `IG_API_VERSION` explicitly only to another currently supported version,
+and run `doctor` plus a bounded archive check before changing a scheduled job.
 
 ## Setup
 1. Ensure you have a long-lived token for your professional account. Follow Meta docs to exchange a short-lived token if needed.
@@ -103,7 +109,8 @@ normal retry budget. Filesystem replacement does not guarantee survival of power
 After installing `requests`, run `python -m unittest discover -s tests -v`.
 The suite uses temporary archive fixtures and mocked HTTP; it needs no Instagram
 account or token and makes no live API/download calls. CI runs it on Python 3.11
-and 3.12. It does not validate live API compatibility or historical archive data.
+and 3.12. It verifies the supported default URL but does not validate live API
+compatibility, app permissions or historical archive data.
 
 ## Scheduling
 Example cron entry (daily at 02:15 UTC):
