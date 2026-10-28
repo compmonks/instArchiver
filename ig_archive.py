@@ -24,7 +24,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
-DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v19.0")
+DEFAULT_API_VERSION = os.getenv("IG_API_VERSION", "v24.0")
 GRAPH_API_BASE = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
 DEFAULT_ARCHIVE_DIR = (
     os.getenv("IG_ARCHIVE_DATA_DIR")

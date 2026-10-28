@@ -29,6 +29,10 @@ class ArchiveIntegrityTests(unittest.TestCase):
             archive.archive("user", "dummy-token", self.root, 50, max_pages, since_last)
         return fetch
 
+    def test_default_graph_api_version_is_supported(self):
+        self.assertEqual(archive.DEFAULT_API_VERSION, "v24.0")
+        self.assertEqual(archive.GRAPH_API_BASE, "https://graph.facebook.com/v24.0")
+
     def test_failed_parent_download_preserves_state_and_can_retry(self):
         page = {"data": [media()]}
         before = self.state_path.read_bytes()
